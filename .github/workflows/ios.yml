@@ -1,44 +1,152 @@
-name: iOS starter workflow
+name: iOS Build
 
 on:
   push:
-    branches: [ "main" ]
+    branches:
+      - main
   pull_request:
-    branches: [ "main" ]
+    branches:
+      - main
 
 jobs:
   build:
-    name: Build and Test default scheme using any available iPhone simulator
+    name: Build iOS App
     runs-on: macos-latest
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-      - name: Set Default Scheme
+
+      - name: Show Xcode Version
         run: |
-          scheme_list=$(xcodebuild -list -json | tr -d "\n")
-          default=$(echo $scheme_list | ruby -e "require 'json'; puts JSON.parse(STDIN.gets)['project']['targets'][0]")
-          echo $default | cat >default
-          echo Using default scheme: $default
+          xcodebuild -version
+          xcrun simctl list devices available
+
+      - name: Find Project
+        id: project
+        shell: bash
+        run: |
+          set -e
+
+          workspace=$(find . -maxdepth 2 -name "*.xcworkspace" -print -quit)
+          project=$(find . -maxdepth 2 -name "*.xcodeproj" -print -quit)
+
+          if [ -n "$workspace" ]; then
+            echo "type=workspace" >> "$GITHUB_OUTPUT"
+            echo "path=$workspace" >> "$GITHUB_OUTPUT"
+          elif [ -n "$project" ]; then
+            echo "type=project" >> "$GITHUB_OUTPUT"
+            echo "path=$project" >> "$GITHUB_OUTPUT"
+          else
+            echo "❌ No .xcodeproj or .xcworkspace found!"
+            exit 1
+          fi
+
+      - name: Find Scheme
+        id: scheme
+        shell: bash
+        run: |
+          set -e
+
+          if [ "${{ steps.project.outputs.type }}" = "workspace" ]; then
+            schemes=$(xcodebuild -workspace "${{ steps.project.outputs.path }}" -list)
+          else
+            schemes=$(xcodebuild -project "${{ steps.project.outputs.path }}" -list)
+          fi
+
+          echo "$schemes"
+
+          scheme=$(echo "$schemes" | \
+            sed -n '/Schemes:/,/^$/p' | \
+            tail -n +2 | \
+            sed 's/^[[:space:]]*//' | \
+            head -n 1)
+
+          if [ -z "$scheme" ]; then
+            echo "❌ Could not find an Xcode scheme."
+            exit 1
+          fi
+
+          echo "scheme=$scheme" >> "$GITHUB_OUTPUT"
+
+          echo "✅ Scheme: $scheme"
+
+      - name: Select Simulator
+        id: simulator
+        shell: bash
+        run: |
+          set -e
+
+          device=$(xcrun simctl list devices available | \
+            grep -E "iPhone .* \(.*\) \(Booted\)|iPhone .* \(" | \
+            head -n 1 | \
+            sed -E 's/^[[:space:]]*//' | \
+            sed -E 's/ \([A-F0-9-]+\) .*$//')
+
+          if [ -z "$device" ]; then
+            echo "❌ No iPhone simulator found."
+            xcrun simctl list devices available
+            exit 1
+          fi
+
+          echo "device=$device" >> "$GITHUB_OUTPUT"
+
+          echo "✅ Simulator: $device"
+
       - name: Build
-        env:
-          scheme: ${{ 'default' }}
-          platform: ${{ 'iOS Simulator' }}
+        shell: bash
         run: |
-          # xcrun xctrace returns via stderr, not the expected stdout (see https://developer.apple.com/forums/thread/663959)
-          device=`xcrun xctrace list devices 2>&1 | grep -oE 'iPhone.*?[^\(]+' | head -1 | awk '{$1=$1;print}' | sed -e "s/ Simulator$//"`
-          if [ $scheme = default ]; then scheme=$(cat default); fi
-          if [ "`ls -A | grep -i \\.xcworkspace\$`" ]; then filetype_parameter="workspace" && file_to_build="`ls -A | grep -i \\.xcworkspace\$`"; else filetype_parameter="project" && file_to_build="`ls -A | grep -i \\.xcodeproj\$`"; fi
-          file_to_build=`echo $file_to_build | awk '{$1=$1;print}'`
-          xcodebuild build-for-testing -scheme "$scheme" -"$filetype_parameter" "$file_to_build" -destination "platform=$platform,name=$device"
+          set -e
+
+          TYPE="${{ steps.project.outputs.type }}"
+          PATH_TO_BUILD="${{ steps.project.outputs.path }}"
+          SCHEME="${{ steps.scheme.outputs.scheme }}"
+          DEVICE="${{ steps.simulator.outputs.device }}"
+
+          echo "Building:"
+          echo "Type: $TYPE"
+          echo "Path: $PATH_TO_BUILD"
+          echo "Scheme: $SCHEME"
+          echo "Device: $DEVICE"
+
+          if [ "$TYPE" = "workspace" ]; then
+            xcodebuild \
+              -workspace "$PATH_TO_BUILD" \
+              -scheme "$SCHEME" \
+              -sdk iphonesimulator \
+              -destination "platform=iOS Simulator,name=$DEVICE" \
+              build
+          else
+            xcodebuild \
+              -project "$PATH_TO_BUILD" \
+              -scheme "$SCHEME" \
+              -sdk iphonesimulator \
+              -destination "platform=iOS Simulator,name=$DEVICE" \
+              build
+          fi
+
       - name: Test
-        env:
-          scheme: ${{ 'default' }}
-          platform: ${{ 'iOS Simulator' }}
+        shell: bash
         run: |
-          # xcrun xctrace returns via stderr, not the expected stdout (see https://developer.apple.com/forums/thread/663959)
-          device=`xcrun xctrace list devices 2>&1 | grep -oE 'iPhone.*?[^\(]+' | head -1 | awk '{$1=$1;print}' | sed -e "s/ Simulator$//"`
-          if [ $scheme = default ]; then scheme=$(cat default); fi
-          if [ "`ls -A | grep -i \\.xcworkspace\$`" ]; then filetype_parameter="workspace" && file_to_build="`ls -A | grep -i \\.xcworkspace\$`"; else filetype_parameter="project" && file_to_build="`ls -A | grep -i \\.xcodeproj\$`"; fi
-          file_to_build=`echo $file_to_build | awk '{$1=$1;print}'`
-          xcodebuild test-without-building -scheme "$scheme" -"$filetype_parameter" "$file_to_build" -destination "platform=$platform,name=$device"
+          set -e
+
+          TYPE="${{ steps.project.outputs.type }}"
+          PATH_TO_BUILD="${{ steps.project.outputs.path }}"
+          SCHEME="${{ steps.scheme.outputs.scheme }}"
+          DEVICE="${{ steps.simulator.outputs.device }}"
+
+          if [ "$TYPE" = "workspace" ]; then
+            xcodebuild \
+              -workspace "$PATH_TO_BUILD" \
+              -scheme "$SCHEME" \
+              -sdk iphonesimulator \
+              -destination "platform=iOS Simulator,name=$DEVICE" \
+              test
+          else
+            xcodebuild \
+              -project "$PATH_TO_BUILD" \
+              -scheme "$SCHEME" \
+              -sdk iphonesimulator \
+              -destination "platform=iOS Simulator,name=$DEVICE" \
+              test
+          fi
